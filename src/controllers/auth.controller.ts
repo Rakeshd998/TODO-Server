@@ -21,13 +21,15 @@ const loginSchema = z.object({
 
 // ─── Cookie Options ───────────────────────────────────────────────────────────
 
+const isProd = process.env.NODE_ENV === 'production';
+
 const REFRESH_COOKIE_OPTIONS = {
   httpOnly: true,
-  secure: process.env.NODE_ENV === 'production',
-  sameSite: 'strict' as const,
-  maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days in ms
+  secure: isProd,                          // HTTPS only in production
+  sameSite: isProd ? 'none' : 'strict',   // 'none' required for cross-origin (GitHub Pages → Render)
+  maxAge: 7 * 24 * 60 * 60 * 1000,       // 7 days
   path: '/',
-};
+} as const;
 
 // ─── Helper ───────────────────────────────────────────────────────────────────
 
