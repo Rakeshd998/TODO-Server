@@ -9,22 +9,22 @@ const app = express();
 // ─── CORS ─────────────────────────────────────────────────────────────────────
 // CORS_ORIGIN can be comma-separated for multiple allowed origins:
 //   e.g. CORS_ORIGIN=https://rakeshd998.github.io,http://localhost:5173
-// const allowedOrigins = (process.env.CORS_ORIGIN || 'http://localhost:5173')
-//   .split(',')
-//   .map((o) => o.trim());
+const allowedOrigins = (process.env.CORS_ORIGIN || 'http://localhost:5173')
+  .split(',')
+  .map((o) => o.trim());
 
-// app.use(
-//   cors({
-//     origin: (origin, callback) => {
-//       // Allow requests with no origin (e.g. Postman / curl / server-to-server)
-//       if (!origin || allowedOrigins.includes(origin)) return callback(null, true);
-//       callback(new Error(`CORS: origin '${origin}' not allowed`));
-//     },
-//     credentials: true, // required for cross-origin cookies
-//   }),
-// );
+app.use(
+  cors({
+    origin: (origin, callback) => {
+      // Allow requests with no origin (e.g. Postman / curl / server-to-server)
+      if (!origin || allowedOrigins.includes(origin)) return callback(null, true);
+      callback(new Error(`CORS: origin '${origin}' not allowed`));
+    },
+    credentials: true, // required for cross-origin cookies
+  }),
+);
 
-app.use(cors());
+// app.use(cors());
 
 
 // ─── Body & Cookie Parsers ────────────────────────────────────────────────────
