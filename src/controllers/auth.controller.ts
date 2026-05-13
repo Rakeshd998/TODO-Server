@@ -1,10 +1,14 @@
 import { Request, Response } from 'express';
+import crypto from 'crypto';
 import { z } from 'zod';
 import { User } from '../models/User';
+import { Todo } from '../models/Todo';
+import { Clip } from '../models/Clip';
 import { generateAccessToken, generateRefreshToken, verifyRefreshToken } from '../utils/jwt';
 import ApiError from '../utils/ApiError';
 import ApiResponse from '../utils/ApiResponse';
 import asyncHandler from '../utils/asyncHandler';
+import { sendPasswordResetEmail } from '../utils/email';
 
 // ─── Validation Schemas ───────────────────────────────────────────────────────
 
@@ -17,6 +21,14 @@ const registerSchema = z.object({
 const loginSchema = z.object({
   email: z.string().email('Invalid email address'),
   password: z.string().min(1, 'Password is required'),
+});
+
+const forgotPasswordSchema = z.object({
+  email: z.string().email('Invalid email address'),
+});
+
+const resetPasswordSchema = z.object({
+  password: z.string().min(8, 'Password must be at least 8 characters').max(100),
 });
 
 // ─── Cookie Options ───────────────────────────────────────────────────────────
@@ -147,4 +159,91 @@ export const logout = asyncHandler(async (req: Request, res: Response): Promise<
 
   res.clearCookie('refreshToken', { path: '/' });
   res.status(200).json(new ApiResponse(200, 'Logged out successfully'));
+});
+
+// POST /api/auth/forgot-password
+export const forgotPassword = asyncHandler(async (req: Request, res: Response): Promise<void> => {
+  const result = forgotPasswordSchema.safeParse(req.body);
+  if (!result.success) {
+    throw new ApiError(400, 'Validation failed', result.error.errors.map((e) => e.message));
+  }
+
+  const { email } = result.data;
+
+  const user = await User.findOne({ email });
+  // Always respond with success to prevent email enumeration attacks
+  if (!user) {
+    res.status(200).json(new ApiResponse(200, 'If that email is registered, a reset link has been sent.'));
+    return;
+  }
+
+  // Generate a cryptographically secure random token
+  const plainToken = crypto.randomBytes(32).toString('hex');
+  const hashedToken = crypto.createHash('sha256').update(plainToken).digest('hex');
+
+  user.resetPasswordToken = hashedToken;
+  user.resetPasswordExpires = new Date(Date.now() + 60 * 60 * 1000); // 1 hour
+  await user.save({ validateBeforeSave: false });
+
+  const clientUrl = process.env.CLIENT_URL ?? 'http://localhost:5173';
+  const resetUrl = `${clientUrl}/reset-password/${plainToken}`;
+
+  try {
+    await sendPasswordResetEmail(email, resetUrl);
+    res.status(200).json(new ApiResponse(200, 'If that email is registered, a reset link has been sent.'));
+  } catch (err) {
+    // Roll back — don't leave a dangling token if email fails
+    user.resetPasswordToken = undefined;
+    user.resetPasswordExpires = undefined;
+    await user.save({ validateBeforeSave: false });
+    console.error('Email send error:', err);
+    throw new ApiError(500, 'Failed to send reset email. Please try again later.');
+  }
+});
+
+// POST /api/auth/reset-password/:token
+export const resetPassword = asyncHandler(async (req: Request, res: Response): Promise<void> => {
+  const result = resetPasswordSchema.safeParse(req.body);
+  if (!result.success) {
+    throw new ApiError(400, 'Validation failed', result.error.errors.map((e) => e.message));
+  }
+
+  const { token } = req.params;
+  const hashedToken = crypto.createHash('sha256').update(token).digest('hex');
+
+  const user = await User.findOne({
+    resetPasswordToken: hashedToken,
+    resetPasswordExpires: { $gt: new Date() }, // must not be expired
+  }).select('+resetPasswordToken +resetPasswordExpires +refreshTokens');
+
+  if (!user) {
+    throw new ApiError(400, 'Password reset token is invalid or has expired.');
+  }
+
+  // Update password and clear reset fields
+  user.password = req.body.password;
+  user.resetPasswordToken = undefined;
+  user.resetPasswordExpires = undefined;
+  // Invalidate all sessions for security
+  user.refreshTokens = [];
+  await user.save();
+
+  res.clearCookie('refreshToken', { path: '/' });
+  res.status(200).json(new ApiResponse(200, 'Password reset successful. Please log in with your new password.'));
+});
+
+// DELETE /api/auth/delete-account  (protected — requires authenticate middleware)
+export const deleteAccount = asyncHandler(async (req: Request, res: Response): Promise<void> => {
+  const userId = req.user!._id;
+
+  // Delete all user data in parallel
+  await Promise.all([
+    Todo.deleteMany({ userId }),
+    Clip.deleteMany({ userId }),
+  ]);
+
+  await User.findByIdAndDelete(userId);
+
+  res.clearCookie('refreshToken', { path: '/' });
+  res.status(200).json(new ApiResponse(200, 'Account deleted successfully.'));
 });

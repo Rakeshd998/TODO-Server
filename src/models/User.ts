@@ -6,6 +6,8 @@ export interface IUser {
   email: string;
   password: string;
   refreshTokens: string[];
+  resetPasswordToken?: string;
+  resetPasswordExpires?: Date;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -27,6 +29,8 @@ const userSchema = new Schema<IUserDocument>(
     },
     password: { type: String, required: true, minlength: 8, select: false },
     refreshTokens: { type: [String], default: [] },
+    resetPasswordToken:   { type: String, select: false },
+    resetPasswordExpires: { type: Date,   select: false },
   },
   { timestamps: true }
 );
@@ -50,6 +54,8 @@ userSchema.methods.toJSON = function () {
   const obj = this.toObject();
   delete obj.password;
   delete obj.refreshTokens;
+  delete obj.resetPasswordToken;
+  delete obj.resetPasswordExpires;
   return obj;
 };
 
