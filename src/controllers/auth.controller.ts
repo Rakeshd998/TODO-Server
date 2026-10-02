@@ -4,6 +4,7 @@ import { z } from 'zod';
 import { User } from '../models/User';
 import { Todo } from '../models/Todo';
 import { Clip } from '../models/Clip';
+import { Message } from '../models/Message';
 import { generateAccessToken, generateRefreshToken, verifyRefreshToken } from '../utils/jwt';
 import ApiError from '../utils/ApiError';
 import ApiResponse from '../utils/ApiResponse';
@@ -35,13 +36,26 @@ const resetPasswordSchema = z.object({
 
 const isProd = process.env.NODE_ENV === 'production';
 
-const REFRESH_COOKIE_OPTIONS = {
+// Attributes must match between set and clear — browsers ignore a clearing
+// Set-Cookie on a cross-site response unless it also has SameSite=None; Secure.
+const COOKIE_BASE_OPTIONS = {
   httpOnly: true,
   secure: isProd,                          // HTTPS only in production
-  sameSite: isProd ? 'none' : 'strict',   // 'none' required for cross-origin (GitHub Pages → Render)
-  maxAge: 7 * 24 * 60 * 60 * 1000,       // 7 days
+  sameSite: isProd ? 'none' : 'strict',   // 'none' required when frontend and API are on different sites
   path: '/',
 } as const;
+
+const REFRESH_COOKIE_OPTIONS = {
+  ...COOKIE_BASE_OPTIONS,
+  maxAge: 7 * 24 * 60 * 60 * 1000,       // 7 days
+} as const;
+
+const clearRefreshCookie = (res: Response) => res.clearCookie('refreshToken', COOKIE_BASE_OPTIONS);
+
+// How long an already-rotated refresh token is still accepted. Covers concurrent
+// refreshes (two tabs, a retried request after a cold start) without weakening
+// reuse detection for genuinely old tokens.
+const ROTATION_GRACE_MS = 60 * 1000;
 
 // ─── Helper ───────────────────────────────────────────────────────────────────
 
@@ -110,34 +124,53 @@ export const refresh = asyncHandler(async (req: Request, res: Response): Promise
   if (!incomingToken) throw new ApiError(401, 'Refresh token not found');
 
   const payload = verifyRefreshToken(incomingToken);
+  if (payload.type !== 'refresh') throw new ApiError(401, 'Invalid token type');
 
-  const user = await User.findById(payload.userId).select('+refreshTokens');
-  if (!user) throw new ApiError(401, 'User not found');
+  const { accessToken, refreshToken: newRefreshToken } = issueTokens(payload.userId, payload.email);
 
-  const tokenIndex = user.refreshTokens.indexOf(incomingToken);
+  // Rotate atomically: swap the incoming token for the new one in a single update,
+  // so two concurrent refreshes can't overwrite each other's result.
+  let user = await User.findOneAndUpdate(
+    { _id: payload.userId, refreshTokens: incomingToken },
+    {
+      $set: { 'refreshTokens.$': newRefreshToken },
+      $push: {
+        recentlyRotated: { $each: [{ token: incomingToken, rotatedAt: new Date() }], $slice: -10 },
+      },
+    },
+    { new: true },
+  );
 
-  // Reuse detection — token not in DB means it was already rotated (possible theft)
-  if (tokenIndex === -1) {
-    user.refreshTokens = []; // Invalidate ALL sessions as a security measure
-    await user.save({ validateBeforeSave: false });
+  // Not an active token — was it rotated moments ago by a concurrent request?
+  // Then this is the same client racing itself, not theft: start an extra session.
+  if (!user) {
+    user = await User.findOneAndUpdate(
+      {
+        _id: payload.userId,
+        recentlyRotated: {
+          $elemMatch: { token: incomingToken, rotatedAt: { $gt: new Date(Date.now() - ROTATION_GRACE_MS) } },
+        },
+      },
+      { $push: { refreshTokens: { $each: [newRefreshToken], $slice: -5 } } },
+      { new: true },
+    );
+  }
+
+  // Reuse detection — an old, already-rotated token was replayed (possible theft)
+  if (!user) {
+    const { matchedCount } = await User.updateOne(
+      { _id: payload.userId },
+      { $set: { refreshTokens: [], recentlyRotated: [] } }, // Invalidate ALL sessions
+    );
+    clearRefreshCookie(res);
+    if (matchedCount === 0) throw new ApiError(401, 'User not found');
     throw new ApiError(403, 'Refresh token reuse detected. All sessions invalidated.');
   }
 
-  // Rotate tokens
-  const { accessToken, refreshToken: newRefreshToken } = issueTokens(
-    user._id.toString(),
-    user.email
-  );
-
-  user.refreshTokens.splice(tokenIndex, 1, newRefreshToken);
-  await user.save({ validateBeforeSave: false });
-
-  // Return user info (without sensitive fields) alongside the new access token
-  // so the frontend can restore the user's name/email on page refresh.
-  const { password: _pw, refreshTokens: _rt, ...safeUser } = user.toObject();
-
+  // Return user info alongside the new access token so the frontend can restore
+  // the user's name/email on page refresh (toJSON strips sensitive fields).
   res.cookie('refreshToken', newRefreshToken, REFRESH_COOKIE_OPTIONS);
-  res.status(200).json(new ApiResponse(200, 'Tokens refreshed', { accessToken, user: safeUser }));
+  res.status(200).json(new ApiResponse(200, 'Tokens refreshed', { accessToken, user }));
 });
 
 // POST /api/auth/logout
@@ -157,7 +190,7 @@ export const logout = asyncHandler(async (req: Request, res: Response): Promise<
     }
   }
 
-  res.clearCookie('refreshToken', { path: '/' });
+  clearRefreshCookie(res);
   res.status(200).json(new ApiResponse(200, 'Logged out successfully'));
 });
 
@@ -186,7 +219,7 @@ export const forgotPassword = asyncHandler(async (req: Request, res: Response): 
   await user.save({ validateBeforeSave: false });
 
   const clientUrl = process.env.CLIENT_URL ?? 'http://localhost:5173';
-  const resetUrl = `${clientUrl}/reset-password/${plainToken}`;
+  const resetUrl = `${clientUrl}/#/reset-password/${plainToken}`;
 
   try {
     await sendPasswordResetEmail(email, resetUrl);
@@ -221,14 +254,14 @@ export const resetPassword = asyncHandler(async (req: Request, res: Response): P
   }
 
   // Update password and clear reset fields
-  user.password = req.body.password;
+  user.password = result.data.password;
   user.resetPasswordToken = undefined;
   user.resetPasswordExpires = undefined;
   // Invalidate all sessions for security
   user.refreshTokens = [];
   await user.save();
 
-  res.clearCookie('refreshToken', { path: '/' });
+  clearRefreshCookie(res);
   res.status(200).json(new ApiResponse(200, 'Password reset successful. Please log in with your new password.'));
 });
 
@@ -240,10 +273,11 @@ export const deleteAccount = asyncHandler(async (req: Request, res: Response): P
   await Promise.all([
     Todo.deleteMany({ userId }),
     Clip.deleteMany({ userId }),
+    Message.deleteMany({ $or: [{ senderId: userId }, { receiverId: userId }] }),
   ]);
 
   await User.findByIdAndDelete(userId);
 
-  res.clearCookie('refreshToken', { path: '/' });
+  clearRefreshCookie(res);
   res.status(200).json(new ApiResponse(200, 'Account deleted successfully.'));
 });

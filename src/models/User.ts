@@ -6,6 +6,7 @@ export interface IUser {
   email: string;
   password: string;
   refreshTokens: string[];
+  recentlyRotated: { token: string; rotatedAt: Date }[];
   resetPasswordToken?: string;
   resetPasswordExpires?: Date;
   createdAt: Date;
@@ -29,6 +30,13 @@ const userSchema = new Schema<IUserDocument>(
     },
     password: { type: String, required: true, minlength: 8, select: false },
     refreshTokens: { type: [String], default: [] },
+    // Refresh tokens rotated in the last moments — lets a concurrent refresh (another
+    // tab, a retried request) succeed instead of being treated as token theft
+    recentlyRotated: {
+      type: [{ _id: false, token: String, rotatedAt: Date }],
+      default: [],
+      select: false,
+    },
     resetPasswordToken:   { type: String, select: false },
     resetPasswordExpires: { type: Date,   select: false },
   },
@@ -54,6 +62,7 @@ userSchema.methods.toJSON = function () {
   const obj = this.toObject();
   delete obj.password;
   delete obj.refreshTokens;
+  delete obj.recentlyRotated;
   delete obj.resetPasswordToken;
   delete obj.resetPasswordExpires;
   return obj;

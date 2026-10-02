@@ -48,8 +48,8 @@ export const sendPasswordResetEmail = async (
               <table cellpadding="0" cellspacing="0" border="0" style="margin:0 auto 20px;">
                 <tr>
                   <td valign="middle" style="padding-right:12px;">
-                    <img src="https://todo-type-script-nu.vercel.app/grip-logo.png"
-                         alt="Grip Logo"
+                    <img src="https://i.ibb.co/8g6ZPHVb/grip-logo.png"
+                         alt="Grip"
                          width="52" height="52"
                          style="display:block;border-radius:12px;" />
                   </td>

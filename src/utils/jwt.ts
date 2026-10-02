@@ -1,3 +1,4 @@
+import crypto from 'crypto';
 import jwt, { SignOptions } from 'jsonwebtoken';
 
 export interface JwtPayload {
@@ -23,7 +24,12 @@ export const generateRefreshToken = (userId: string, email: string): string =>
   jwt.sign(
     { userId, email, type: 'refresh' } as JwtPayload,
     getEnv('REFRESH_TOKEN_SECRET'),
-    { expiresIn: (process.env.REFRESH_TOKEN_EXPIRY ?? '7d') } as SignOptions
+    {
+      expiresIn: (process.env.REFRESH_TOKEN_EXPIRY ?? '7d'),
+      // Unique id — two tokens issued for the same user in the same second would
+      // otherwise be byte-identical, which breaks per-token rotation tracking
+      jwtid: crypto.randomUUID(),
+    } as SignOptions
   );
 
 export const verifyAccessToken = (token: string): JwtPayload =>
