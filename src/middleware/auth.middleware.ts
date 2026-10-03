@@ -1,5 +1,5 @@
 import { Request, Response, NextFunction } from 'express';
-import { verifyAccessToken } from '../utils/jwt';
+import { verifyAccessToken, isIssuedBeforeRevocation } from '../utils/jwt';
 import { User } from '../models/User';
 import ApiError from '../utils/ApiError';
 import asyncHandler from '../utils/asyncHandler';
@@ -21,6 +21,9 @@ export const authenticate = asyncHandler(
 
     const user = await User.findById(payload.userId).select('-password -refreshTokens');
     if (!user) throw new ApiError(401, 'User no longer exists');
+    if (isIssuedBeforeRevocation(payload.iat, user.sessionsRevokedAt)) {
+      throw new ApiError(401, 'Session expired. Please log in again.');
+    }
 
     req.user = user;
     next();

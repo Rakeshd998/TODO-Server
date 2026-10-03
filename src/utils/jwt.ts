@@ -5,7 +5,16 @@ export interface JwtPayload {
   userId: string;
   email: string;
   type: 'access' | 'refresh';
+  iat?: number; // issued-at, seconds since epoch (added by jsonwebtoken)
 }
+
+/**
+ * True if the token was issued before the user's sessions were revoked.
+ * Compared in whole seconds (JWT iat precision); tokens for the current session
+ * are issued *after* the revocation timestamp is taken, so they always pass.
+ */
+export const isIssuedBeforeRevocation = (iat: number | undefined, revokedAt: Date | null | undefined): boolean =>
+  !!revokedAt && iat !== undefined && iat < Math.floor(revokedAt.getTime() / 1000);
 
 const getEnv = (key: string): string => {
   const val = process.env[key];

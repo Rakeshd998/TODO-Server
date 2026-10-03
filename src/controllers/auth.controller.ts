@@ -5,7 +5,12 @@ import { User } from '../models/User';
 import { Todo } from '../models/Todo';
 import { Clip } from '../models/Clip';
 import { Message } from '../models/Message';
-import { generateAccessToken, generateRefreshToken, verifyRefreshToken } from '../utils/jwt';
+import {
+  generateAccessToken,
+  generateRefreshToken,
+  verifyRefreshToken,
+  isIssuedBeforeRevocation,
+} from '../utils/jwt';
 import ApiError from '../utils/ApiError';
 import ApiResponse from '../utils/ApiResponse';
 import asyncHandler from '../utils/asyncHandler';
@@ -31,6 +36,19 @@ const forgotPasswordSchema = z.object({
 const resetPasswordSchema = z.object({
   password: z.string().min(8, 'Password must be at least 8 characters').max(100),
 });
+
+const updateProfileSchema = z.object({
+  name: z.string().trim().min(1, 'Name cannot be empty').max(100, 'Name is too long'),
+});
+
+const changePasswordSchema = z
+  .object({
+    currentPassword: z.string().min(1, 'Current password is required'),
+    newPassword: z.string().min(8, 'New password must be at least 8 characters').max(100),
+  })
+  .refine((d) => d.currentPassword !== d.newPassword, {
+    message: 'New password must be different from your current password',
+  });
 
 // ─── Cookie Options ───────────────────────────────────────────────────────────
 
@@ -125,6 +143,18 @@ export const refresh = asyncHandler(async (req: Request, res: Response): Promise
 
   const payload = verifyRefreshToken(incomingToken);
   if (payload.type !== 'refresh') throw new ApiError(401, 'Invalid token type');
+
+  // Signed out by a password change elsewhere: a plain "log in again", not theft —
+  // must be checked before reuse detection, which would wipe the new session too
+  const owner = await User.findById(payload.userId).select('sessionsRevokedAt');
+  if (!owner) {
+    clearRefreshCookie(res);
+    throw new ApiError(401, 'User not found');
+  }
+  if (isIssuedBeforeRevocation(payload.iat, owner.sessionsRevokedAt)) {
+    clearRefreshCookie(res);
+    throw new ApiError(401, 'Session expired. Please log in again.');
+  }
 
   const { accessToken, refreshToken: newRefreshToken } = issueTokens(payload.userId, payload.email);
 
@@ -259,6 +289,7 @@ export const resetPassword = asyncHandler(async (req: Request, res: Response): P
   user.resetPasswordExpires = undefined;
   // Invalidate all sessions for security
   user.refreshTokens = [];
+  user.sessionsRevokedAt = new Date();
   await user.save();
 
   clearRefreshCookie(res);
@@ -280,4 +311,52 @@ export const deleteAccount = asyncHandler(async (req: Request, res: Response): P
 
   clearRefreshCookie(res);
   res.status(200).json(new ApiResponse(200, 'Account deleted successfully.'));
+});
+
+// PATCH /api/auth/me  (protected) — update profile fields (currently the display name)
+export const updateProfile = asyncHandler(async (req: Request, res: Response): Promise<void> => {
+  const result = updateProfileSchema.safeParse(req.body);
+  if (!result.success) {
+    throw new ApiError(400, 'Validation failed', result.error.errors.map((e) => e.message));
+  }
+
+  const user = await User.findByIdAndUpdate(
+    req.user!._id,
+    { $set: { name: result.data.name } },
+    { new: true, runValidators: true },
+  );
+  if (!user) throw new ApiError(404, 'User not found');
+
+  res.status(200).json(new ApiResponse(200, 'Profile updated', { user }));
+});
+
+// POST /api/auth/change-password  (protected)
+// Verifies the current password, sets the new one, and signs out every other
+// device. The current session gets fresh tokens so the user stays logged in here.
+export const changePassword = asyncHandler(async (req: Request, res: Response): Promise<void> => {
+  const result = changePasswordSchema.safeParse(req.body);
+  if (!result.success) {
+    throw new ApiError(400, 'Validation failed', result.error.errors.map((e) => e.message));
+  }
+  const { currentPassword, newPassword } = result.data;
+
+  const user = await User.findById(req.user!._id).select('+password +refreshTokens +recentlyRotated');
+  if (!user) throw new ApiError(404, 'User not found');
+
+  const isMatch = await user.comparePassword(currentPassword);
+  if (!isMatch) throw new ApiError(400, 'Current password is incorrect');
+
+  // Revoke first, then issue this session's tokens, so they post-date the revocation
+  user.sessionsRevokedAt = new Date();
+  const { accessToken, refreshToken } = issueTokens(user._id.toString(), user.email);
+
+  user.password = newPassword; // hashed by the pre-save hook
+  user.refreshTokens = [refreshToken]; // only this session survives
+  user.recentlyRotated = [];
+  await user.save();
+
+  res.cookie('refreshToken', refreshToken, REFRESH_COOKIE_OPTIONS);
+  res.status(200).json(
+    new ApiResponse(200, 'Password changed. Other devices have been signed out.', { user, accessToken }),
+  );
 });

@@ -7,6 +7,8 @@ import {
   forgotPassword,
   resetPassword,
   deleteAccount,
+  updateProfile,
+  changePassword,
 } from '../controllers/auth.controller';
 import { authenticate } from '../middleware/auth.middleware';
 
@@ -19,5 +21,7 @@ router.post('/logout',           logout);
 router.post('/forgot-password',  forgotPassword);
 router.post('/reset-password/:token', resetPassword);
 router.delete('/delete-account', authenticate, deleteAccount);
+router.patch('/me',               authenticate, updateProfile);
+router.post('/change-password',   authenticate, changePassword);
 
 export default router;

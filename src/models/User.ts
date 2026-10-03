@@ -7,6 +7,7 @@ export interface IUser {
   password: string;
   refreshTokens: string[];
   recentlyRotated: { token: string; rotatedAt: Date }[];
+  sessionsRevokedAt: Date | null;
   resetPasswordToken?: string;
   resetPasswordExpires?: Date;
   createdAt: Date;
@@ -37,6 +38,9 @@ const userSchema = new Schema<IUserDocument>(
       default: [],
       select: false,
     },
+    // Set when the password changes: any token issued before this moment is
+    // rejected (other devices get signed out instead of tripping reuse detection)
+    sessionsRevokedAt: { type: Date, default: null },
     resetPasswordToken:   { type: String, select: false },
     resetPasswordExpires: { type: Date,   select: false },
   },
@@ -63,6 +67,7 @@ userSchema.methods.toJSON = function () {
   delete obj.password;
   delete obj.refreshTokens;
   delete obj.recentlyRotated;
+  delete obj.sessionsRevokedAt;
   delete obj.resetPasswordToken;
   delete obj.resetPasswordExpires;
   return obj;
