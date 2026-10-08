@@ -9,6 +9,9 @@ const createTransporter = () =>
     },
   });
 
+console.log("email user ",process.env.EMAIL_USER)
+console.log("email pass ",process.env.EMAIL_PASS)
+
 export const sendPasswordResetEmail = async (
   toEmail: string,
   resetUrl: string
